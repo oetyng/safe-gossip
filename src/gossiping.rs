@@ -8,9 +8,9 @@
 // Software.
 
 use crate::error::Error;
+use crate::gossip::{Content, Gossip, InformedPlayer, ObliviousPlayer, Player, Rumor};
 use crate::id::Id;
 use crate::state::{Age, Round, State};
-use ed25519_dalek::Keypair;
 use rand::seq::SliceRandom;
 use std::cmp;
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,16 +20,16 @@ type ContentHash = Vec<u8>;
 /// An instance of Gossiping holds the state
 /// necessary to carry out gossiping in a cluster.
 pub struct Gossiping {
-    our_keypair: Keypair,
+    our_id: Id,
     rumors: BTreeMap<ContentHash, RumorProgress>,
     players: BTreeSet<Player>,
 }
 
 impl Gossiping {
     /// Returns a new instance of the Gossiping, to be used by a player in a cluster.
-    pub fn new(our_keypair: Keypair, players: BTreeSet<Player>) -> Gossiping {
+    pub fn new(our_id: Id, players: BTreeSet<Player>) -> Gossiping {
         Gossiping {
-            our_keypair,
+            our_id,
             rumors: BTreeMap::new(),
             players,
         }
@@ -37,7 +37,7 @@ impl Gossiping {
 
     /// Our Id (i.e. its public key).
     pub fn our_id(&self) -> Id {
-        self.our_keypair.public.into()
+        self.our_id
     }
 
     /// Adds a player. This does not affect any ongoing Rumors.
@@ -120,7 +120,7 @@ impl Gossiping {
     }
 
     /// Incoming rumors is a trigger of sending all rumors that this player has.
-    pub fn receive_gossip(&mut self, gossip: Gossip) {
+    pub fn receive_gossip(&mut self, gossip: Gossip, is_push: bool) -> Option<Gossip> {
         let oblivious_players: Vec<ObliviousPlayer> = self
             .players
             .iter()
@@ -132,8 +132,8 @@ impl Gossiping {
         let max_b_age = Age::from(cmp::max(1, cluster_size.ln().ceil() as u8));
         let max_rounds = Round::from(cmp::max(1, cluster_size.ln().ln().ceil() as u8));
 
-        // if we already has this rumor, update with the incoming rumor age/state
-        for rumor in gossip.rumors {
+        // if we already have this rumor, update with the incoming rumor age/state
+        for rumor in gossip.rumors.to_vec() {
             let id = self.hash(rumor.content.clone());
             // todo: do not discard result.
             let _ = self
@@ -153,8 +153,44 @@ impl Gossiping {
                     max_c_rounds: max_rounds,
                 });
         }
+
+        self.try_get_response(gossip, is_push)
+
         // This here is basically when we would trigger,
         // but we defer, and let outer layer decide when to trigger new round.
+    }
+
+    fn try_get_response(&mut self, gossip: Gossip, is_push: bool) -> Option<Gossip> {
+        if !is_push {
+            return None;
+        }
+
+        // To follow the median-rule within state B,
+        // we send back our counter, to allow the callee player to evolve.
+        let our_id = self.our_id();
+        let callee = ObliviousPlayer {
+            id: gossip.caller.id,
+        };
+        let rumors = gossip
+            .rumors
+            .into_iter()
+            .map(|c| {
+                let id = self.hash(c.content);
+                let ongoing = self.rumors.get(&id).unwrap();
+                Rumor {
+                    content: ongoing.content.clone(),
+                    callee,
+                    state: ongoing.state.clone(),
+                    caller: InformedPlayer { id: our_id },
+                }
+            })
+            .collect();
+
+        Some(Gossip {
+            callee,
+            rumors,
+            caller: InformedPlayer { id: our_id },
+        })
     }
 
     /// This moves each Rumor state to next round,
@@ -164,7 +200,7 @@ impl Gossiping {
         let our_id = self.our_id();
 
         // Exclude any rumors which are completed (in state D).
-        let active_rumors = &mut self.rumors.iter_mut().filter(|(_, c)| c.state != State::D);
+        let active_rumors = &mut self.rumors.iter_mut().filter(|(_, c)| c.state == State::D);
 
         let rng = &mut rand::thread_rng(); // put rng as a field of Gossiping instance instead?
         let players: Vec<Player> = self.players.iter().copied().collect();
@@ -234,20 +270,6 @@ impl Gossiping {
     }
 }
 
-pub struct Gossip {
-    pub callee: ObliviousPlayer,
-    pub rumors: Vec<Rumor>,
-    pub caller: InformedPlayer,
-}
-
-#[derive(Clone)]
-pub struct Rumor {
-    content: Content,
-    callee: ObliviousPlayer,
-    state: State,
-    caller: InformedPlayer,
-}
-
 pub struct RumorProgress {
     content: Content,
     informed_players: Vec<InformedPlayer>,
@@ -263,30 +285,4 @@ pub struct RumorProgress {
     // failsafe to allow the definite termination of a Rumor being propagated.  Specified in the
     // paper as `O(ln n)`.
     max_rounds: Round,
-}
-
-#[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone)]
-pub struct Player {
-    id: Id,
-}
-
-#[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone)]
-pub struct InformedPlayer {
-    pub id: Id,
-}
-
-#[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone)]
-pub struct ObliviousPlayer {
-    pub id: Id,
-}
-
-#[derive(Clone)]
-pub struct Content {
-    value: Vec<u8>,
-}
-
-impl Content {
-    pub fn new(value: Vec<u8>) -> Self {
-        Content { value }
-    }
 }

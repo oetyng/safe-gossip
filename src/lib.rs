@@ -61,8 +61,8 @@
 extern crate itertools;
 #[macro_use]
 extern crate log;
-// #[macro_use]
-// extern crate serde_derive;
+#[macro_use]
+extern crate serde_derive;
 #[macro_use]
 extern crate quick_error;
 #[cfg(test)]
@@ -70,10 +70,12 @@ extern crate quick_error;
 extern crate unwrap;
 
 mod error;
+mod gossip;
 mod gossip_stepper;
 mod gossiping;
 mod id;
 mod state;
+mod transmission;
 
 pub use crate::error::Error;
 pub use crate::gossiping::Gossiping;

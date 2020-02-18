@@ -11,7 +11,7 @@ use crate::id::Id;
 use std::collections::BTreeMap;
 
 /// This represents the state of a single rumor from this player's perspective.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Debug, Deserialize, Clone, PartialEq)]
 pub enum State {
     /// A - Startup Phase.
     /// The startup phase starts in the round in which the rumor is created and _ends with the first round after whose
@@ -41,12 +41,18 @@ pub enum State {
     D,
 }
 
+impl Default for State {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl State {
     /// Construct a new `State` where we're the initial player for the rumor.  We start in
     /// state B with `age` set to `1`.
     pub fn new() -> Self {
         State::B {
-            round: Round::new(),
+            round: Round::default(),
             age: Age::from(1),
             player_ages: BTreeMap::new(),
         }
@@ -58,14 +64,14 @@ impl State {
     pub fn new_from_player(player_age: Age, max_b_age: Age) -> Self {
         if player_age < max_b_age {
             return State::B {
-                round: Round::new(),
+                round: Round::default(),
                 age: Age::from(1),
                 player_ages: BTreeMap::new(),
             };
         }
         State::C {
-            rounds_in_state_b: Round::new(),
-            round: Round::new(),
+            rounds_in_state_b: Round::default(),
+            round: Round::default(),
         }
     }
 
@@ -125,7 +131,7 @@ impl State {
                     } else if *player_age >= age_max {
                         return State::C {
                             rounds_in_state_b: round,
-                            round: Round::new(),
+                            round: Round::default(),
                         };
                     } else {
                         greater_or_equal += 1;
@@ -140,7 +146,7 @@ impl State {
                 if age >= age_max {
                     return State::C {
                         rounds_in_state_b: round,
-                        round: Round::new(),
+                        round: Round::default(),
                     };
                 }
                 State::B {
@@ -185,7 +191,7 @@ impl State {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
+#[derive(Copy, Clone, Serialize, Debug, Deserialize, PartialEq, PartialOrd)]
 pub struct Age {
     value: u8,
 }
@@ -210,15 +216,12 @@ impl std::ops::AddAssign for Age {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
+#[derive(Default, Copy, Clone, Serialize, Debug, Deserialize, PartialEq, PartialOrd)]
 pub struct Round {
     value: u8,
 }
 
 impl Round {
-    pub fn new() -> Self {
-        Self { value: 0 }
-    }
     pub fn from(value: u8) -> Self {
         Self { value }
     }
