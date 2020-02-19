@@ -19,35 +19,14 @@ use std::collections::BTreeMap;
 
 pub trait PlayerChannel {
     fn receive_from_player(&mut self) -> Option<Vec<u8>>;
-    fn send_to_player(&mut self, transmission: Vec<u8>);
+    fn send_to_player(&mut self, id: Id, transmission: Vec<u8>);
 }
 
 pub trait ClientChannel {
     fn read_from_client(&mut self) -> Option<Content>;
 }
 
-pub struct Player {}
-pub struct Client {}
-
-// todo: quic-p2p
-impl PlayerChannel for Player {
-    fn receive_from_player(&mut self) -> Option<Vec<u8>> {
-        // todo: impl
-        None
-    }
-
-    fn send_to_player(&mut self, transmission: Vec<u8>) {
-        // todo: impl
-        println!("{:?}", transmission);
-    }
-}
-
-impl ClientChannel for Client {
-    fn read_from_client(&mut self) -> Option<Content> {
-        // todo: impl
-        Some(Content { value: vec![0] })
-    }
-}
+// todo: quic-p2p impl
 
 impl<C, P> Future for GossipStepper<C, P>
 where
@@ -70,11 +49,12 @@ where
     }
 }
 
-struct GossipStepper<C, P> {
+/// Used to carry out gossiping.
+pub struct GossipStepper<C, P> {
     keys: Keypair,
     gossiping: Gossiping,
-    client: Client,
-    players: BTreeMap<PublicKey, Player>,
+    client: C,
+    players: BTreeMap<PublicKey, P>,
     is_processing: bool,
     _p_c: std::marker::PhantomData<C>,
     _p_p: std::marker::PhantomData<P>,
@@ -85,23 +65,23 @@ where
     C: ClientChannel,
     P: PlayerChannel,
 {
-    // Currently unused.
-    // fn new(
-    //     keys: Keypair,
-    //     gossiping: Gossiping,
-    //     client: Client,
-    //     players: BTreeMap<PublicKey, Player>,
-    // ) -> Self {
-    //     Self {
-    //         keys,
-    //         gossiping,
-    //         client,
-    //         players,
-    //         is_processing: false,
-    //         _p_c: std::marker::PhantomData,
-    //         _p_p: std::marker::PhantomData,
-    //     }
-    // }
+    /// Constructor
+    pub fn new(
+        keys: Keypair,
+        gossiping: Gossiping,
+        client: C,
+        players: BTreeMap<PublicKey, P>,
+    ) -> Self {
+        Self {
+            keys,
+            gossiping,
+            client,
+            players,
+            is_processing: false,
+            _p_c: std::marker::PhantomData,
+            _p_p: std::marker::PhantomData,
+        }
+    }
 
     fn abort(&mut self) -> bool {
         // todo: receive abort msg from somewhere
@@ -124,9 +104,9 @@ where
                 has_response = true;
                 let mut transmission = Transmission::deserialise(&bytes[..], public_key)?;
                 let (gossip, is_push) = transmission.get_value()?;
-                if let Some(response) = self.gossiping.receive_gossip(gossip, is_push) {
+                if let Some(response) = self.gossiping.receive_gossip(&gossip, is_push) {
                     let result = Transmission::serialise(&response, false, &self.keys);
-                    stream.send_to_player(result?);
+                    stream.send_to_player(gossip.callee.id, result?);
                 }
             }
         }
@@ -148,7 +128,7 @@ where
                 .find(|(c, _)| Id(c.to_bytes()) == gossip.callee.id)
             {
                 let result = Transmission::serialise(&gossip, true, &self.keys);
-                stream.send_to_player(result?);
+                stream.send_to_player(gossip.callee.id, result?);
             }
         }
         Ok(())

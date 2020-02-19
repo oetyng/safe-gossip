@@ -78,5 +78,6 @@ mod state;
 mod transmission;
 
 pub use crate::error::Error;
+pub use crate::gossip_stepper::GossipStepper;
 pub use crate::gossiping::Gossiping;
 pub use crate::id::Id;

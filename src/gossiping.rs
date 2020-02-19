@@ -63,7 +63,7 @@ impl Gossiping {
         self.players = self
             .players
             .iter()
-            .filter(|c| c.id == player_id)
+            .filter(|c| c.id != player_id)
             .copied()
             .collect();
 
@@ -74,12 +74,12 @@ impl Gossiping {
         // //     ongoing.1.oblivious_players = ongoing.1
         // //         .oblivious_players
         // //         .iter()
-        // //         .filter(|x| x.id == player_id)
+        // //         .filter(|x| x.id != player_id)
         // //         .collect();
         // //     ongoing.1
         // //         .informed_players
         // //         .iter()
-        // //         .filter(|x| x.id == player_id)
+        // //         .filter(|x| x.id != player_id)
         // //         .collect();
         // // }
     }
@@ -120,11 +120,11 @@ impl Gossiping {
     }
 
     /// Incoming rumors is a trigger of sending all rumors that this player has.
-    pub fn receive_gossip(&mut self, gossip: Gossip, is_push: bool) -> Option<Gossip> {
+    pub fn receive_gossip(&mut self, gossip: &Gossip, is_push: bool) -> Option<Gossip> {
         let oblivious_players: Vec<ObliviousPlayer> = self
             .players
             .iter()
-            .filter(|c| c.id == gossip.caller.id)
+            .filter(|c| c.id != gossip.caller.id)
             .map(|c| ObliviousPlayer { id: c.id })
             .collect();
 
@@ -145,7 +145,9 @@ impl Gossiping {
                 })
                 .or_insert(RumorProgress {
                     content: rumor.content.clone(),
-                    informed_players: vec![], // potential tweak: include their view of this
+                    informed_players: vec![InformedPlayer {
+                        id: rumor.caller.id,
+                    }], // potential tweak: include their view of this
                     oblivious_players: oblivious_players.iter().copied().collect(),
                     state: State::new_from_player(rumor.state.get_age().unwrap(), max_b_age),
                     max_b_age,
@@ -160,37 +162,85 @@ impl Gossiping {
         // but we defer, and let outer layer decide when to trigger new round.
     }
 
-    fn try_get_response(&mut self, gossip: Gossip, is_push: bool) -> Option<Gossip> {
+    fn try_get_response(&mut self, gossip: &Gossip, is_push: bool) -> Option<Gossip> {
         if !is_push {
             return None;
         }
-
         // To follow the median-rule within state B,
-        // we send back our counter, to allow the callee player to evolve.
+        // we send back our counter, to allow the caller to evolve.
         let our_id = self.our_id();
-        let callee = ObliviousPlayer {
+        let caller = ObliviousPlayer {
             id: gossip.caller.id,
         };
-        let rumors = gossip
-            .rumors
-            .into_iter()
-            .map(|c| {
-                let id = self.hash(c.content);
-                let ongoing = self.rumors.get(&id).unwrap();
-                Rumor {
-                    content: ongoing.content.clone(),
-                    callee,
-                    state: ongoing.state.clone(),
-                    caller: InformedPlayer { id: our_id },
-                }
-            })
-            .collect();
-
-        Some(Gossip {
-            callee,
-            rumors,
+        let mut gossip = Gossip {
+            callee: caller,
+            rumors: gossip
+                .rumors
+                .to_vec()
+                .into_iter()
+                .map(|c| {
+                    let id = self.hash(c.content);
+                    let ongoing = self.rumors.get(&id).unwrap();
+                    Rumor {
+                        content: ongoing.content.clone(),
+                        callee: caller,
+                        state: ongoing.state.clone(),
+                        caller: InformedPlayer { id: our_id },
+                    }
+                })
+                .collect(),
             caller: InformedPlayer { id: our_id },
-        })
+        };
+
+        // todo: fix reuse of code from collect_gossip(&mut self)
+        // We also include any rumors we think it doesn't have.
+        // (This will be a distinct set from the ones we received, since we have already registered the receival).
+        // Exclude any rumors which are completed (in state D).
+        let active_rumors = &mut self.rumors.iter_mut().filter(|(_, c)| c.state != State::D);
+        active_rumors.for_each(|(_, mut ongoing)| {
+            // Each rumor has its own cycle of rounds.
+            ongoing.state = ongoing.state.clone().next_round(
+                ongoing.max_b_age,
+                ongoing.max_c_rounds,
+                ongoing.max_rounds,
+            );
+
+            let exists = ongoing
+                .oblivious_players
+                .iter()
+                .copied()
+                .find(|c| c.id == caller.id);
+
+            let callee = match exists {
+                Some(c) => c,
+                None => return,
+            };
+
+            let rumor = Rumor {
+                content: ongoing.content.clone(),
+                callee,
+                state: ongoing.state.clone(),
+                caller: InformedPlayer { id: our_id },
+            };
+
+            gossip.rumors.push(rumor);
+
+            // Move the player from Oblivious to Informed.
+            ongoing.oblivious_players = ongoing
+                .oblivious_players
+                .iter()
+                .filter(|c| c.id != callee.id)
+                .copied()
+                .collect();
+            ongoing
+                .informed_players
+                .push(InformedPlayer { id: callee.id });
+        });
+
+        if !gossip.rumors.is_empty() {
+            return Some(gossip);
+        }
+        None
     }
 
     /// This moves each Rumor state to next round,
@@ -200,7 +250,7 @@ impl Gossiping {
         let our_id = self.our_id();
 
         // Exclude any rumors which are completed (in state D).
-        let active_rumors = &mut self.rumors.iter_mut().filter(|(_, c)| c.state == State::D);
+        let active_rumors = &mut self.rumors.iter_mut().filter(|(_, c)| c.state != State::D);
 
         let rng = &mut rand::thread_rng(); // put rng as a field of Gossiping instance instead?
         let players: Vec<Player> = self.players.iter().copied().collect();
@@ -250,7 +300,7 @@ impl Gossiping {
                 ongoing.oblivious_players = ongoing
                     .oblivious_players
                     .iter()
-                    .filter(|c| c.id == callee.id)
+                    .filter(|c| c.id != callee.id)
                     .copied()
                     .collect();
                 ongoing
