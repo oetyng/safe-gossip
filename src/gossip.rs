@@ -25,8 +25,10 @@ pub struct Rumor {
     pub caller: InformedPlayer,
 }
 
+/// A participant in a gossip cluster.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Copy, Clone)]
 pub struct Player {
+    /// The id of the player
     pub id: Id,
 }
 
@@ -40,7 +42,9 @@ pub struct ObliviousPlayer {
     pub id: Id,
 }
 
+/// The content of a rumor.
 #[derive(Clone, Serialize, Debug, Deserialize)]
 pub struct Content {
+    /// The serialized content.
     pub value: Vec<u8>,
 }

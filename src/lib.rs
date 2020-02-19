@@ -78,6 +78,7 @@ mod state;
 mod transmission;
 
 pub use crate::error::Error;
-pub use crate::gossip_stepper::GossipStepper;
+pub use crate::gossip::{Content, Player};
+pub use crate::gossip_stepper::{ClientChannel, ClientCmd, GossipStepper, PlayerChannel};
 pub use crate::gossiping::Gossiping;
 pub use crate::id::Id;

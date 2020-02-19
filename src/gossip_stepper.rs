@@ -15,15 +15,32 @@ use crate::transmission::Transmission;
 use ed25519_dalek::Keypair;
 use ed25519_dalek::PublicKey;
 use futures::{Async, Future, Poll};
-use std::collections::BTreeMap;
 
+/// Defines the communication interface between
+/// players in this gossip protocol.
+/// Should allow for implementation of any transport protocol.
 pub trait PlayerChannel {
+    /// Receives rumors from other players.
     fn receive_from_player(&mut self) -> Option<Vec<u8>>;
-    fn send_to_player(&mut self, id: Id, transmission: Vec<u8>);
+    /// Sends rumors to other player,
+    fn send_to_player(&mut self, id: Id, transmission: Vec<u8>) -> Result<(), Error>;
 }
 
+/// Defines the communication interface between
+/// the user and this instance of the gossip protocol.
+/// Should allow for implementation of any transport protocol.
 pub trait ClientChannel {
-    fn read_from_client(&mut self) -> Option<Content>;
+    /// Reads any input from user.
+    fn read_from_client(&mut self) -> Option<ClientCmd>;
+}
+
+/// A cmd sent by the
+/// user of this protocol.
+pub enum ClientCmd {
+    /// Starts a new rumor.
+    NewRumor(Content),
+    /// Shuts down this instance.
+    Shutdown,
 }
 
 // todo: quic-p2p impl
@@ -54,8 +71,9 @@ pub struct GossipStepper<C, P> {
     keys: Keypair,
     gossiping: Gossiping,
     client: C,
-    players: BTreeMap<PublicKey, P>,
+    players: Vec<(PublicKey, P)>,
     is_processing: bool,
+    is_aborted: bool,
     _p_c: std::marker::PhantomData<C>,
     _p_p: std::marker::PhantomData<P>,
 }
@@ -70,7 +88,7 @@ where
         keys: Keypair,
         gossiping: Gossiping,
         client: C,
-        players: BTreeMap<PublicKey, P>,
+        players: Vec<(PublicKey, P)>,
     ) -> Self {
         Self {
             keys,
@@ -78,19 +96,39 @@ where
             client,
             players,
             is_processing: false,
+            is_aborted: false,
             _p_c: std::marker::PhantomData,
             _p_p: std::marker::PhantomData,
         }
     }
 
+    /// Returns the Id of this instance.
+    pub fn our_id(&mut self) -> Id {
+        self.gossiping.our_id()
+    }
+
+    /// Adds a player to the gossip cluster.
+    pub fn add_player(&mut self, public_key: PublicKey, channel: P) -> Result<(), Error> {
+        self.gossiping.add_player(Id::from(public_key))?;
+        self.players.push((public_key, channel));
+        Ok(())
+    }
+
+    /// Removes a player from the gossip cluster.
+    pub fn remove_player(&mut self, _public_key: PublicKey) {
+        // todo
+    }
+
     fn abort(&mut self) -> bool {
-        // todo: receive abort msg from somewhere
-        false
+        self.is_aborted
     }
 
     fn read_from_client(&mut self) -> Result<(), Error> {
-        if let Some(content) = self.client.read_from_client() {
-            self.gossiping.initiate_rumor(content)?
+        if let Some(cmd) = self.client.read_from_client() {
+            match cmd {
+                ClientCmd::NewRumor(content) => self.gossiping.initiate_rumor(content)?,
+                ClientCmd::Shutdown => self.is_aborted = true,
+            }
         }
         Ok(())
     }
@@ -106,7 +144,7 @@ where
                 let (gossip, is_push) = transmission.get_value()?;
                 if let Some(response) = self.gossiping.receive_gossip(&gossip, is_push) {
                     let result = Transmission::serialise(&response, false, &self.keys);
-                    stream.send_to_player(gossip.callee.id, result?);
+                    stream.send_to_player(gossip.callee.id, result?)?;
                 }
             }
         }
@@ -128,7 +166,7 @@ where
                 .find(|(c, _)| Id(c.to_bytes()) == gossip.callee.id)
             {
                 let result = Transmission::serialise(&gossip, true, &self.keys);
-                stream.send_to_player(gossip.callee.id, result?);
+                stream.send_to_player(gossip.callee.id, result?)?;
             }
         }
         Ok(())
