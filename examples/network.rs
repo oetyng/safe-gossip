@@ -52,7 +52,6 @@
 use rand;
 #[macro_use]
 extern crate unwrap;
-//use bincode::{deserialize, serialize};
 use ed25519_dalek::{Keypair, PublicKey};
 use futures::sync::mpsc;
 use futures::{Async, Future, Poll, Stream};
@@ -83,7 +82,8 @@ impl TestPlayerIncomingChannel {
 impl PlayerIncomingChannel for TestPlayerIncomingChannel {
     fn receive_from_players(&mut self) -> Vec<(PublicKey, Vec<u8>)> {
         let mut incoming = vec![];
-        while let Async::Ready(Some(message)) = unwrap!(self.receiver.poll()) {
+        // todo: handle poll error here?
+        while let Ok(Async::Ready(Some(message))) = self.receiver.poll() {
             incoming.push(message);
         }
         incoming
@@ -104,7 +104,13 @@ impl TestPlayerOutgoingChannels {
 
 impl PlayerOutgoingChannels for TestPlayerOutgoingChannels {
     fn send_to_player(&mut self, id: Id, transmission: (PublicKey, Vec<u8>)) -> Result<(), Error> {
-        unwrap!(unwrap!(self.senders.get_mut(&id)).unbounded_send(transmission));
+        match self.senders.get_mut(&id) {
+            Some(sender) => match sender.unbounded_send(transmission) {
+                Ok(_) => (),
+                _ => println!("error in send_to_player() at network.rs line 111"),
+            },
+            _ => println!("error in send_to_player() at network.rs line 113"),
+        }
         Ok(())
     }
 }
@@ -122,7 +128,8 @@ impl TestClientChannel {
 
 impl ClientChannel for TestClientChannel {
     fn read_from_client(&mut self) -> Option<ClientCmd> {
-        if let Async::Ready(Some(cmd)) = unwrap!(self.receiver.poll()) {
+        // todo: handle poll error here?
+        if let Ok(Async::Ready(Some(cmd))) = self.receiver.poll() {
             return Some(cmd);
         }
         None
@@ -162,22 +169,33 @@ impl Network {
             let _ = client_receivers.insert(id, client_receiver);
         }
 
-        let player_channels = player_infos
+        let outgoing_channels = player_infos
             .values_mut()
             .map(|k| {
-                let channel = TestPlayerOutgoingChannels::new(player_senders.clone());
-                (Id::from(k.public), channel)
+                let this_id = Id::from(k.public);
+                let other_players = player_senders
+                    .iter()
+                    .filter(|(id, _)| **id != this_id) // exclude this player from the outgoing channels, as to not send to itself
+                    .map(|(id, c)| (*id, c.clone()))
+                    .collect::<BTreeMap<Id, mpsc::UnboundedSender<(PublicKey, Vec<u8>)>>>();
+                let channel = TestPlayerOutgoingChannels::new(other_players);
+                (this_id, channel)
             })
             .collect::<BTreeMap<Id, TestPlayerOutgoingChannels>>();
 
         let mut nodes = vec![];
         for (id, keys) in player_infos {
+            let other_players = players
+                .iter()
+                .filter(|p| p.id != id) // exclude this player the list of players
+                .map(|p| *p)
+                .collect::<BTreeSet<Player>>();
             let node = GossipStepper::new(
                 keys,
-                Gossiping::new(id, players.clone()),
+                Gossiping::new(id, other_players.clone()),
                 TestClientChannel::new(unwrap!(client_receivers.remove(&id))),
                 TestPlayerIncomingChannel::new(unwrap!(player_receivers.remove(&id))),
-                player_channels.clone(),
+                unwrap!(outgoing_channels.get(&id)).clone(),
             );
             nodes.push(node);
         }
@@ -210,7 +228,11 @@ impl Network {
         let cmd = ClientCmd::NewRumor(Content {
             value: String::from(message).into_bytes(),
         });
-        unwrap!(self.client_senders.values_mut().collect::<Vec<_>>()[i].unbounded_send(cmd));
+        let player = &self.client_senders.values_mut().collect::<Vec<_>>()[i];
+        match player.unbounded_send(cmd) {
+            Ok(_) => (),
+            _ => println!("error in send() at network.rs line 224"),
+        }
         Ok(())
     }
 
@@ -236,18 +258,24 @@ impl Future for Network {
 impl Drop for Network {
     fn drop(&mut self) {
         for sender in &mut self.client_senders.values_mut() {
-            unwrap!(sender.unbounded_send(ClientCmd::Shutdown));
+            match sender.unbounded_send(ClientCmd::Shutdown) {
+                Ok(_) => (),
+                _ => println!("error in drop() at network.rs line 253"),
+            }
         }
         let node_futures = mem::replace(&mut self.node_futures, vec![]);
         for node_future in node_futures {
-            unwrap!(node_future.wait());
+            match node_future.wait() {
+                Ok(_) => (),
+                _ => println!("error in drop() at network.rs line 260"),
+            }
         }
     }
 }
 
 fn main() {
-    let num_of_nodes = 16;
-    let num_of_extra_msgs = 0;
+    let num_of_nodes = 100;
+    let num_of_extra_msgs = 10;
     println!("Number of extra msgs to input {:?}", num_of_extra_msgs);
 
     let mut polls = vec![];

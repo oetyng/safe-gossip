@@ -140,8 +140,10 @@ impl Gossiping {
                 .rumors
                 .entry(id)
                 .and_modify(|e| {
-                    e.state
-                        .receive_rumor(rumor.caller.id, rumor.state.get_age().unwrap())
+                    e.state.receive_rumor(
+                        rumor.caller.id,
+                        rumor.state.get_age().unwrap_or_else(|| Age::max()),
+                    )
                 })
                 .or_insert(RumorProgress {
                     content: rumor.content.clone(),
@@ -149,7 +151,10 @@ impl Gossiping {
                         id: rumor.caller.id,
                     }], // potential tweak: include their view of this
                     oblivious_players: oblivious_players.iter().copied().collect(),
-                    state: State::new_from_player(rumor.state.get_age().unwrap(), max_b_age),
+                    state: State::new_from_player(
+                        rumor.state.get_age().unwrap_or_else(|| Age::max()),
+                        max_b_age,
+                    ),
                     max_b_age,
                     max_rounds,
                     max_c_rounds: max_rounds,
@@ -178,15 +183,15 @@ impl Gossiping {
                 .rumors
                 .to_vec()
                 .into_iter()
-                .map(|c| {
+                .filter_map(|c| {
                     let id = self.hash(c.content);
-                    let ongoing = self.rumors.get(&id).unwrap();
-                    Rumor {
+                    let ongoing = self.rumors.get(&id)?; // not finding id here would not happen though, since it was added above
+                    Some(Rumor {
                         content: ongoing.content.clone(),
                         callee: caller,
                         state: ongoing.state.clone(),
                         caller: InformedPlayer { id: our_id },
-                    }
+                    })
                 })
                 .collect(),
             caller: InformedPlayer { id: our_id },
@@ -204,6 +209,10 @@ impl Gossiping {
                 ongoing.max_c_rounds,
                 ongoing.max_rounds,
             );
+
+            if ongoing.state == State::D {
+                return;
+            }
 
             let exists = ongoing
                 .oblivious_players
@@ -275,6 +284,10 @@ impl Gossiping {
                     ongoing.max_c_rounds,
                     ongoing.max_rounds,
                 );
+
+                if ongoing.state == State::D {
+                    return;
+                }
 
                 let exists = ongoing
                     .oblivious_players

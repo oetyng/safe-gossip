@@ -15,7 +15,6 @@ use crate::transmission::Transmission;
 use ed25519_dalek::Keypair;
 use ed25519_dalek::PublicKey;
 use futures::{Async, Future, Poll};
-use std::collections::BTreeMap;
 
 /// Defines the communication interface between
 /// players in this gossip protocol.
@@ -66,9 +65,15 @@ where
             return Ok(Async::Ready(()));
         }
 
-        self.read_from_client()?;
-        self.receive_from_players()?;
-        self.try_send_gossip()?;
+        if self.read_from_client().is_err() {
+            println!("self.read_from_client() is_err!");
+        }
+        if self.receive_from_players().is_err() {
+            println!("self.receive_from_players() is_err!");
+        }
+        if self.try_send_gossip().is_err() {
+            println!("self.try_send_gossip() is_err!");
+        }
 
         Ok(Async::NotReady)
     }
@@ -80,7 +85,7 @@ pub struct GossipStepper<C, I, O> {
     gossiping: Gossiping,
     client: C,
     listener: I,
-    players: BTreeMap<Id, O>,
+    player_channels: O,
     is_processing: bool,
     is_aborted: bool,
     _p_c: std::marker::PhantomData<C>,
@@ -100,14 +105,14 @@ where
         gossiping: Gossiping,
         client: C,
         listener: I,
-        players: BTreeMap<Id, O>,
+        player_channels: O,
     ) -> Self {
         Self {
             keys,
             gossiping,
             client,
             listener,
-            players,
+            player_channels,
             is_processing: false,
             is_aborted: false,
             _p_c: std::marker::PhantomData,
@@ -122,11 +127,11 @@ where
     }
 
     /// Adds a player to the gossip cluster.
-    pub fn add_player(&mut self, public_key: PublicKey, channel: O) -> Result<(), Error> {
+    pub fn add_player(&mut self, public_key: PublicKey, channels: O) -> Result<(), Error> {
         let id = Id::from(public_key);
         self.gossiping.add_player(id)?;
         // todo: don't discard result
-        let _ = self.players.insert(id, channel);
+        self.player_channels = channels;
         Ok(())
     }
 
@@ -157,14 +162,13 @@ where
             let mut transmission = Transmission::deserialise(&bytes[..], &public_key)?;
             let (gossip, is_push) = transmission.get_value()?;
             if let Some(response) = self.gossiping.receive_gossip(&gossip, is_push) {
-                let result = Transmission::serialise(&response, false, &self.keys);
-                let stream_result = self.players.get_mut(&Id::from(public_key));
-                match stream_result {
-                    Some(stream) => {
-                        stream.send_to_player(gossip.callee.id, (self.keys.public, result?))?
-                    }
-                    None => continue,
-                }
+                let result = Transmission::serialise(&response, false, &self.keys); // Id::from(public_key)
+                self.player_channels
+                    .send_to_player(response.callee.id, (self.keys.public, result?))?
+            } else if is_push {
+                println!("No gossip collected in receive_from_players().")
+            } else {
+                println!("Response received.")
             }
         }
         self.is_processing = has_response;
@@ -178,15 +182,11 @@ where
         }
         if let Some(gossip) = self.gossiping.collect_gossip() {
             self.is_processing = true;
-
-            if let Some((_, stream)) = self
-                .players
-                .iter_mut()
-                .find(|(c, _)| **c == gossip.callee.id)
-            {
-                let result = Transmission::serialise(&gossip, true, &self.keys);
-                stream.send_to_player(gossip.callee.id, (self.keys.public, result?))?;
-            }
+            let result = Transmission::serialise(&gossip, true, &self.keys);
+            self.player_channels
+                .send_to_player(gossip.callee.id, (self.keys.public, result?))?;
+        } else {
+            println!("No gossip collected in try_send_gossip().")
         }
         Ok(())
     }
