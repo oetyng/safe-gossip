@@ -49,72 +49,67 @@
     non_camel_case_types
 )]
 
-//use futures::try_ready;
 use rand;
-//#[macro_use]
-//extern crate tokio_io;
 #[macro_use]
 extern crate unwrap;
 //use bincode::{deserialize, serialize};
+use ed25519_dalek::{Keypair, PublicKey};
 use futures::sync::mpsc;
 use futures::{Async, Future, Poll, Stream};
 use futures_cpupool::{CpuFuture, CpuPool};
-use safe_gossip::{
-    ClientChannel, ClientCmd, Content, Error, GossipStepper, Gossiping, Id, Player, PlayerChannel,
-};
-
-// use crate::error::Error;
-// use crate::gossip::{Content, Player};
-// use crate::gossip_stepper::{ClientChannel, ClientCmd, GossipStepper, PlayerChannel};
-// use crate::gossiping::Gossiping;
-// use crate::id::Id;
-
-use sha3::Sha3_512;
-//use itertools::Itertools;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
-//use std::cell::RefCell;
-//use std::collections::HashMap;
+use safe_gossip::{
+    ClientChannel, ClientCmd, Content, Error, GossipStepper, Gossiping, Id, Player,
+    PlayerIncomingChannel, PlayerOutgoingChannels,
+};
+use sha3::Sha3_512;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Debug, Formatter};
-//use std::io::Write;
 use std::iter::Iterator;
 use std::mem;
-//use std::rc::Rc;
-//use std::thread;
-//use tokio::executor::current_thread;
-//use tokio_io::AsyncRead;
-use ed25519_dalek::Keypair;
-//use ed25519_dalek::PublicKey;
-use std::collections::{BTreeMap, BTreeSet};
 
-pub struct TestPlayerChannel {
-    receiver: mpsc::UnboundedReceiver<Vec<u8>>,
-    senders: BTreeMap<Id, mpsc::UnboundedSender<Vec<u8>>>,
+///
+pub struct TestPlayerIncomingChannel {
+    receiver: mpsc::UnboundedReceiver<(PublicKey, Vec<u8>)>,
 }
 
-impl TestPlayerChannel {
-    fn new(
-        receiver: mpsc::UnboundedReceiver<Vec<u8>>,
-        senders: BTreeMap<Id, mpsc::UnboundedSender<Vec<u8>>>,
-    ) -> Self {
-        Self { senders, receiver }
+impl TestPlayerIncomingChannel {
+    fn new(receiver: mpsc::UnboundedReceiver<(PublicKey, Vec<u8>)>) -> Self {
+        Self { receiver }
     }
 }
 
-impl PlayerChannel for TestPlayerChannel {
-    fn receive_from_player(&mut self) -> Option<Vec<u8>> {
+impl PlayerIncomingChannel for TestPlayerIncomingChannel {
+    fn receive_from_players(&mut self) -> Vec<(PublicKey, Vec<u8>)> {
+        let mut incoming = vec![];
         while let Async::Ready(Some(message)) = unwrap!(self.receiver.poll()) {
-            return Some(message);
+            incoming.push(message);
         }
-        None
+        incoming
     }
+}
 
-    fn send_to_player(&mut self, id: Id, transmission: Vec<u8>) -> Result<(), Error> {
+///
+#[derive(Clone)]
+pub struct TestPlayerOutgoingChannels {
+    senders: BTreeMap<Id, mpsc::UnboundedSender<(PublicKey, Vec<u8>)>>,
+}
+
+impl TestPlayerOutgoingChannels {
+    fn new(senders: BTreeMap<Id, mpsc::UnboundedSender<(PublicKey, Vec<u8>)>>) -> Self {
+        Self { senders }
+    }
+}
+
+impl PlayerOutgoingChannels for TestPlayerOutgoingChannels {
+    fn send_to_player(&mut self, id: Id, transmission: (PublicKey, Vec<u8>)) -> Result<(), Error> {
         unwrap!(unwrap!(self.senders.get_mut(&id)).unbounded_send(transmission));
         Ok(())
     }
 }
 
+/// Receives cmds from user.
 pub struct TestClientChannel {
     receiver: mpsc::UnboundedReceiver<ClientCmd>,
 }
@@ -127,20 +122,11 @@ impl TestClientChannel {
 
 impl ClientChannel for TestClientChannel {
     fn read_from_client(&mut self) -> Option<ClientCmd> {
-        while let Async::Ready(Some(cmd)) = unwrap!(self.receiver.poll()) {
+        if let Async::Ready(Some(cmd)) = unwrap!(self.receiver.poll()) {
             return Some(cmd);
         }
         None
     }
-}
-
-struct Info {
-    player: Player,
-    keys: Keypair,
-    player_sender: mpsc::UnboundedSender<Vec<u8>>,
-    player_receiver: mpsc::UnboundedReceiver<Vec<u8>>,
-    client_sender: mpsc::UnboundedSender<ClientCmd>,
-    client_receiver: mpsc::UnboundedReceiver<ClientCmd>,
 }
 
 struct Network {
@@ -155,9 +141,11 @@ struct Network {
 
 impl Network {
     fn new(node_count: usize) -> Self {
-        let players = BTreeSet::new();
+        let mut players = BTreeSet::new();
         let mut player_senders = BTreeMap::new();
         let mut client_senders = BTreeMap::new();
+        let mut player_receivers = BTreeMap::new();
+        let mut client_receivers = BTreeMap::new();
         let mut player_infos = BTreeMap::new();
         for _ in 0..node_count {
             let mut rng = rand::thread_rng();
@@ -166,42 +154,36 @@ impl Network {
             let (client_sender, client_receiver) = mpsc::unbounded();
             let id = Id::from(keys.public);
 
-            player_infos.insert(
-                id,
-                Info {
-                    player: Player { id },
-                    keys,
-                    player_sender: player_sender.clone(),
-                    player_receiver: player_receiver,
-                    client_sender: client_sender.clone(),
-                    client_receiver: client_receiver,
-                },
-            );
-
-            player_senders.insert(id, player_sender);
-            client_senders.insert(id, client_sender);
+            let _ = player_infos.insert(id, keys);
+            let _ = players.insert(Player { id });
+            let _ = player_senders.insert(id, player_sender);
+            let _ = client_senders.insert(id, client_sender);
+            let _ = player_receivers.insert(id, player_receiver);
+            let _ = client_receivers.insert(id, client_receiver);
         }
 
-        let mut player_channels = vec![];
-        for (_, player) in player_infos {
-            let channel = TestPlayerChannel::new(player.player_receiver, player_senders.clone());
-            player_channels.push((player.keys.public, channel));
-        }
+        let player_channels = player_infos
+            .values_mut()
+            .map(|k| {
+                let channel = TestPlayerOutgoingChannels::new(player_senders.clone());
+                (Id::from(k.public), channel)
+            })
+            .collect::<BTreeMap<Id, TestPlayerOutgoingChannels>>();
 
         let mut nodes = vec![];
-        for (id, player) in player_infos {
+        for (id, keys) in player_infos {
             let node = GossipStepper::new(
-                player.keys,
+                keys,
                 Gossiping::new(id, players.clone()),
-                TestClientChannel::new(player.client_receiver),
+                TestClientChannel::new(unwrap!(client_receivers.remove(&id))),
+                TestPlayerIncomingChannel::new(unwrap!(player_receivers.remove(&id))),
                 player_channels.clone(),
             );
             nodes.push(node);
         }
 
-        nodes.sort_by(|lhs, rhs| lhs.our_id().cmp(&rhs.our_id()));
+        //nodes.sort_by(|lhs, rhs| lhs.our_id().cmp(&rhs.our_id()));
 
-        let mut rng = rand::thread_rng();
         let mut network = Network {
             // pool: CpuPool::new(1),
             pool: CpuPool::new_num_cpus(),
@@ -253,7 +235,7 @@ impl Future for Network {
 
 impl Drop for Network {
     fn drop(&mut self) {
-        for (_, sender) in &mut self.client_senders {
+        for sender in &mut self.client_senders.values_mut() {
             unwrap!(sender.unbounded_send(ClientCmd::Shutdown));
         }
         let node_futures = mem::replace(&mut self.node_futures, vec![]);

@@ -15,15 +15,22 @@ use crate::transmission::Transmission;
 use ed25519_dalek::Keypair;
 use ed25519_dalek::PublicKey;
 use futures::{Async, Future, Poll};
+use std::collections::BTreeMap;
 
 /// Defines the communication interface between
 /// players in this gossip protocol.
 /// Should allow for implementation of any transport protocol.
-pub trait PlayerChannel {
+pub trait PlayerIncomingChannel {
     /// Receives rumors from other players.
-    fn receive_from_player(&mut self) -> Option<Vec<u8>>;
+    fn receive_from_players(&mut self) -> Vec<(PublicKey, Vec<u8>)>;
+}
+
+/// Defines the communication interface between
+/// players in this gossip protocol.
+/// Should allow for implementation of any transport protocol.
+pub trait PlayerOutgoingChannels {
     /// Sends rumors to other player,
-    fn send_to_player(&mut self, id: Id, transmission: Vec<u8>) -> Result<(), Error>;
+    fn send_to_player(&mut self, id: Id, transmission: (PublicKey, Vec<u8>)) -> Result<(), Error>;
 }
 
 /// Defines the communication interface between
@@ -45,10 +52,11 @@ pub enum ClientCmd {
 
 // todo: quic-p2p impl
 
-impl<C, P> Future for GossipStepper<C, P>
+impl<C, I, O> Future for GossipStepper<C, I, O>
 where
     C: ClientChannel,
-    P: PlayerChannel,
+    I: PlayerIncomingChannel,
+    O: PlayerOutgoingChannels,
 {
     type Item = ();
     type Error = Error;
@@ -67,38 +75,44 @@ where
 }
 
 /// Used to carry out gossiping.
-pub struct GossipStepper<C, P> {
+pub struct GossipStepper<C, I, O> {
     keys: Keypair,
     gossiping: Gossiping,
     client: C,
-    players: Vec<(PublicKey, P)>,
+    listener: I,
+    players: BTreeMap<Id, O>,
     is_processing: bool,
     is_aborted: bool,
     _p_c: std::marker::PhantomData<C>,
-    _p_p: std::marker::PhantomData<P>,
+    _p_i: std::marker::PhantomData<I>,
+    _p_o: std::marker::PhantomData<O>,
 }
 
-impl<C, P> GossipStepper<C, P>
+impl<C, I, O> GossipStepper<C, I, O>
 where
     C: ClientChannel,
-    P: PlayerChannel,
+    I: PlayerIncomingChannel,
+    O: PlayerOutgoingChannels,
 {
     /// Constructor
     pub fn new(
         keys: Keypair,
         gossiping: Gossiping,
         client: C,
-        players: Vec<(PublicKey, P)>,
+        listener: I,
+        players: BTreeMap<Id, O>,
     ) -> Self {
         Self {
             keys,
             gossiping,
             client,
+            listener,
             players,
             is_processing: false,
             is_aborted: false,
             _p_c: std::marker::PhantomData,
-            _p_p: std::marker::PhantomData,
+            _p_i: std::marker::PhantomData,
+            _p_o: std::marker::PhantomData,
         }
     }
 
@@ -108,9 +122,11 @@ where
     }
 
     /// Adds a player to the gossip cluster.
-    pub fn add_player(&mut self, public_key: PublicKey, channel: P) -> Result<(), Error> {
-        self.gossiping.add_player(Id::from(public_key))?;
-        self.players.push((public_key, channel));
+    pub fn add_player(&mut self, public_key: PublicKey, channel: O) -> Result<(), Error> {
+        let id = Id::from(public_key);
+        self.gossiping.add_player(id)?;
+        // todo: don't discard result
+        let _ = self.players.insert(id, channel);
         Ok(())
     }
 
@@ -136,15 +152,18 @@ where
     /// Iterate the players reading any new messages from them.
     fn receive_from_players(&mut self) -> Result<(), Error> {
         let mut has_response = false;
-        let message_streams = &mut self.players.iter_mut();
-        for (public_key, stream) in message_streams {
-            if let Some(bytes) = stream.receive_from_player() {
-                has_response = true;
-                let mut transmission = Transmission::deserialise(&bytes[..], public_key)?;
-                let (gossip, is_push) = transmission.get_value()?;
-                if let Some(response) = self.gossiping.receive_gossip(&gossip, is_push) {
-                    let result = Transmission::serialise(&response, false, &self.keys);
-                    stream.send_to_player(gossip.callee.id, result?)?;
+        for (public_key, bytes) in self.listener.receive_from_players() {
+            has_response = true;
+            let mut transmission = Transmission::deserialise(&bytes[..], &public_key)?;
+            let (gossip, is_push) = transmission.get_value()?;
+            if let Some(response) = self.gossiping.receive_gossip(&gossip, is_push) {
+                let result = Transmission::serialise(&response, false, &self.keys);
+                let stream_result = self.players.get_mut(&Id::from(public_key));
+                match stream_result {
+                    Some(stream) => {
+                        stream.send_to_player(gossip.callee.id, (self.keys.public, result?))?
+                    }
+                    None => continue,
                 }
             }
         }
@@ -163,10 +182,10 @@ where
             if let Some((_, stream)) = self
                 .players
                 .iter_mut()
-                .find(|(c, _)| Id(c.to_bytes()) == gossip.callee.id)
+                .find(|(c, _)| **c == gossip.callee.id)
             {
                 let result = Transmission::serialise(&gossip, true, &self.keys);
-                stream.send_to_player(gossip.callee.id, result?)?;
+                stream.send_to_player(gossip.callee.id, (self.keys.public, result?))?;
             }
         }
         Ok(())
