@@ -107,9 +107,9 @@ impl PlayerOutgoingChannels for TestPlayerOutgoingChannels {
         match self.senders.get_mut(&id) {
             Some(sender) => match sender.unbounded_send(transmission) {
                 Ok(_) => (),
-                _ => println!("error in send_to_player() at network.rs line 111"),
+                _ => println!("error in send_to_player() at network.rs line 110"),
             },
-            _ => println!("error in send_to_player() at network.rs line 113"),
+            _ => println!("error in send_to_player() at network.rs line 112"),
         }
         Ok(())
     }
@@ -187,7 +187,7 @@ impl Network {
         for (id, keys) in player_infos {
             let other_players = players
                 .iter()
-                .filter(|p| p.id != id) // exclude this player the list of players
+                .filter(|p| p.id != id) // exclude this player from the list of players
                 .map(|p| *p)
                 .collect::<BTreeSet<Player>>();
             let node = GossipStepper::new(
@@ -231,7 +231,7 @@ impl Network {
         let player = &self.client_senders.values_mut().collect::<Vec<_>>()[i];
         match player.unbounded_send(cmd) {
             Ok(_) => (),
-            _ => println!("error in send() at network.rs line 224"),
+            _ => println!("error in send() at network.rs line 234"),
         }
         Ok(())
     }
@@ -260,14 +260,14 @@ impl Drop for Network {
         for sender in &mut self.client_senders.values_mut() {
             match sender.unbounded_send(ClientCmd::Shutdown) {
                 Ok(_) => (),
-                _ => println!("error in drop() at network.rs line 253"),
+                _ => println!("error in drop() at network.rs line 263"),
             }
         }
         let node_futures = mem::replace(&mut self.node_futures, vec![]);
         for node_future in node_futures {
             match node_future.wait() {
                 Ok(_) => (),
-                _ => println!("error in drop() at network.rs line 260"),
+                _ => println!("error in drop() at network.rs line 270"),
             }
         }
     }

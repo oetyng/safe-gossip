@@ -40,6 +40,11 @@ impl Gossiping {
         self.our_id
     }
 
+    /// Returns all rumors we know about.
+    pub fn rumors(&self) -> &BTreeMap<ContentHash, RumorProgress> {
+        &self.rumors
+    }
+
     /// Adds a player. This does not affect any ongoing Rumors.
     pub fn add_player(&mut self, player_id: Id) -> Result<(), Error> {
         // Inserting to set, so no need to check player is not already here.
@@ -348,4 +353,107 @@ pub struct RumorProgress {
     // failsafe to allow the definite termination of a Rumor being propagated.  Specified in the
     // paper as `O(ln n)`.
     max_rounds: Round,
+}
+
+impl Default for Gossiping {
+    fn default() -> Self {
+        let mut rng = rand::thread_rng();
+        let keys = ed25519_dalek::Keypair::generate::<sha3::Sha3_512, _>(&mut rng);
+        let id: Id = keys.public.into();
+        Gossiping::new(id, BTreeSet::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use itertools::Itertools;
+    use rand::{self, Rng};
+    use std::collections::BTreeMap;
+    use unwrap::unwrap;
+
+    fn create_network(node_count: u32) -> Vec<Gossiping> {
+        let mut gossipers = std::iter::repeat_with(Gossiping::default)
+            .take(node_count as usize)
+            .collect_vec();
+        // Connect all the gossipers.
+        for i in 0..(gossipers.len() - 1) {
+            let lhs_id = gossipers[i].our_id();
+            for j in (i + 1)..gossipers.len() {
+                let rhs_id = gossipers[j].our_id();
+                let _ = gossipers[j].add_player(lhs_id);
+                let _ = gossipers[i].add_player(rhs_id);
+            }
+        }
+        gossipers
+    }
+
+    #[test]
+    fn prove_of_stop() {
+        let mut gossipers = create_network(20);
+        let num_of_msgs = 100;
+
+        let mut rng = rand::thread_rng();
+
+        let mut rumors: Vec<Content> = Vec::new();
+        for _ in 0..num_of_msgs {
+            let mut raw = [0u8; 20];
+            rng.fill(&mut raw[..]);
+            let raw_content = String::from_utf8_lossy(&raw).as_bytes().to_vec();
+            rumors.push(Content { value: raw_content });
+        }
+
+        let mut rounds = 0;
+        // Polling
+        let mut processed = true;
+        while processed {
+            rounds += 1;
+            processed = false;
+            let mut messages = BTreeMap::new();
+            // Call `next_round()` on each node to gather a list of all Push RPCs.
+            for gossiper in gossipers.iter_mut() {
+                if !rumors.is_empty() && rng.gen() {
+                    let rumor = unwrap!(rumors.pop());
+                    let _ = gossiper.initiate_rumor(rumor);
+                }
+                if let Some(gossip) = gossiper.collect_gossip() {
+                    processed = true;
+                    let _ = messages.insert((gossiper.our_id(), gossip.callee.id), gossip);
+                }
+            }
+
+            // Send all Push RPCs and the corresponding Pull RPCs.
+            for ((src_id, dst_id), gossip) in messages {
+                let mut v = BTreeMap::new();
+                for node in gossipers.iter_mut() {
+                    if node.our_id() == src_id {
+                        let _ = v.insert(src_id, node);
+                    } else if node.our_id() == dst_id {
+                        let _ = v.insert(dst_id, node);
+                    }
+                }
+                let response = &v.get_mut(&src_id).unwrap().receive_gossip(&gossip, true);
+                if let Some(pull_msg) = response {
+                    assert!(&v
+                        .get_mut(&dst_id)
+                        .unwrap()
+                        .receive_gossip(&pull_msg, false)
+                        .is_none());
+                }
+            }
+        }
+
+        let mut nodes_missed = 0;
+        // Checking nodes missed the message.
+        for gossiper in gossipers.iter() {
+            if gossiper.rumors().len() as u32 != num_of_msgs {
+                nodes_missed += 1;
+            }
+        }
+
+        println!(
+            "gossiping stopped after {:?} rounds, with {} nodes missed the message",
+            rounds, nodes_missed
+        );
+    }
 }
